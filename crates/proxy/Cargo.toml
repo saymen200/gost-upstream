@@ -1,0 +1,13 @@
+[package]
+name = "proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+raw_http = { path = "../raw_http" }
+connectors = { path = "../connectors" }
+rustls = "0.23"
+rcgen = { version = "0.13", features = ["x509-parser"] }
+webpki-roots = "0.26"
+anyhow = "1"
+rustls-pemfile = "2"
