@@ -56,6 +56,14 @@ cargo build --release --target x86_64-pc-windows-gnu -p gost-upstream
 Client — Settings → Apps → Optional features, в современных Windows часто
 уже включён).
 
+**На Windows используйте только `--ssh-target` (режим VM).** `--host-gost`
+там не вариант: `gost-engine` собирается через CMake, но под MSVC для
+этого нужна Windows-сборка OpenSSL с dev-заголовками той же версии
+(ABI должен совпасть), плюс правильное размещение engine-DLL в папке
+модулей `openssl.exe`. Отдельный болезненный квест, не связанный с самим
+`gost-upstream` — проще держать `gost-engine` на Linux-VM и достучаться
+по SSH, благо это уже полностью рабочий путь.
+
 Неподписанный `.exe`, который генерирует сертификаты на лету, перехватывает
 TLS и спавнит дочерние процессы, — типичный кандидат на эвристический
 false positive в антивирусах (HackTool/PUA-класс детектов). Это ожидаемо
