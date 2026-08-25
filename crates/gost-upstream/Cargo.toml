@@ -1,6 +1,6 @@
 [package]
 name = "gost-upstream"
-version = "0.1.0"
+version = "1.0.1"
 edition = "2024"
 license = "MIT"
 description = "GOST TLS upstream proxy — plug a GOST-TLS leg into Burp Suite (or any tool with upstream-proxy support) without it ever touching GOST crypto."

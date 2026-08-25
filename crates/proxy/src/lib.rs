@@ -1,8 +1,10 @@
 pub mod ca;
 pub mod hook;
+mod route_cache;
 
 use ca::Ca;
 use hook::InterceptHook;
+use route_cache::{Route, RouteCache};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -41,13 +43,15 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen_addr)?;
     println!("proxy listening on {listen_addr}");
+    let routes = Arc::new(RouteCache::new());
     for stream in listener.incoming() {
         let stream = stream?;
         let ca = ca.clone();
         let hook = hook.clone();
         let gost = gost.clone();
+        let routes = routes.clone();
         thread::spawn(move || {
-            if let Err(e) = handle_connection(stream, &ca, hook.as_ref(), gost.as_ref()) {
+            if let Err(e) = handle_connection(stream, &ca, hook.as_ref(), gost.as_ref(), &routes) {
                 eprintln!("connection error: {e}");
             }
         });
@@ -60,6 +64,7 @@ fn handle_connection(
     ca: &Ca,
     hook: &dyn InterceptHook,
     gost: Option<&GostFallback>,
+    routes: &RouteCache,
 ) -> anyhow::Result<()> {
     let first_line = read_line_raw(&mut client)?;
     let mut parts = first_line.split_whitespace();
@@ -67,7 +72,7 @@ fn handle_connection(
     let target = parts.next().unwrap_or_default().to_string();
 
     if method == "CONNECT" {
-        handle_connect_tunnel(client, &target, ca, hook, gost)
+        handle_connect_tunnel(client, &target, ca, hook, gost, routes)
     } else if !method.is_empty() {
         handle_plain_http(client, &method, &target, hook)
     } else {
@@ -83,6 +88,7 @@ fn handle_connect_tunnel(
     ca: &Ca,
     hook: &dyn InterceptHook,
     gost: Option<&GostFallback>,
+    routes: &RouteCache,
 ) -> anyhow::Result<()> {
     let (host, port) = target
         .rsplit_once(':')
@@ -109,7 +115,7 @@ fn handle_connect_tunnel(
             continue; // drop
         };
 
-        let response = send_to_target(&host, port, &request, gost)?;
+        let response = send_to_target(&host, port, &request, gost, routes)?;
         hook.on_response(outcome.id, &host, port, &response);
 
         client_tls.write_all(&response)?;
@@ -117,26 +123,76 @@ fn handle_connect_tunnel(
     Ok(())
 }
 
-/// Сначала обычный TLS (rustls, стандартные cipher suite). Если он не
-/// проходит (нет общего cipher suite, отказ хендшейка и т.п. — типичный
-/// симптом ГОСТ-only цели), при наличии `gost` — ретрай через VM/ГОСТ.
-/// Автоматически, без ручного списка хостов: пользователь работает с
-/// большим scope, размечать заранее, где ГОСТ, а где нет — не вариант.
-fn send_to_target(host: &str, port: u16, request: &[u8], gost: Option<&GostFallback>) -> anyhow::Result<Vec<u8>> {
+/// Сначала смотрим в `routes` — если для этого host:port уже известно,
+/// каким путём получилось в прошлый раз, идём сразу туда, без пробного
+/// прямого TLS на каждый запрос (это и было источником лишней задержки
+/// при интерактивном браузинге ГОСТ-only хостов). Но кэш — это подсказка,
+/// а не гарантия: если закешированный маршрут вдруг перестал работать
+/// (сеть моргнула, конфигурация хоста поменялась), не возвращаем ошибку
+/// сразу, а перепробуем всё с нуля — отказоустойчивость важнее
+/// сэкономленной попытки.
+fn send_to_target(
+    host: &str,
+    port: u16,
+    request: &[u8],
+    gost: Option<&GostFallback>,
+    routes: &RouteCache,
+) -> anyhow::Result<Vec<u8>> {
+    match routes.get(host, port) {
+        Some(Route::Direct) => {
+            if let Ok(response) = send_to_target_tls(host, port, request) {
+                return Ok(response);
+            }
+        }
+        Some(Route::Gost) => {
+            if let Some(gost) = gost {
+                if let Ok(response) = call_gost(gost, host, port, request) {
+                    return Ok(response);
+                }
+            }
+        }
+        None => {}
+    }
+    probe_and_route(host, port, request, gost, routes)
+}
+
+/// Полный проход без оглядки на кэш: сначала обычный TLS (rustls,
+/// стандартные cipher suite). Если он не проходит (нет общего cipher
+/// suite, отказ хендшейка и т.п. — типичный симптом ГОСТ-only цели), при
+/// наличии `gost` — ретрай через VM/ГОСТ. Автоматически, без ручного
+/// списка хостов: пользователь работает с большим scope, размечать
+/// заранее, где ГОСТ, а где нет — не вариант. Результат (в случае успеха)
+/// запоминается в `routes` на будущее.
+fn probe_and_route(
+    host: &str,
+    port: u16,
+    request: &[u8],
+    gost: Option<&GostFallback>,
+    routes: &RouteCache,
+) -> anyhow::Result<Vec<u8>> {
     match send_to_target_tls(host, port, request) {
-        Ok(response) => Ok(response),
+        Ok(response) => {
+            routes.set(host, port, Route::Direct);
+            Ok(response)
+        }
         Err(direct_err) => {
             let Some(gost) = gost else { return Err(direct_err) };
             eprintln!("прямой TLS до {host}:{port} не удался ({direct_err}), пробую через ГОСТ");
-            let gost_result = match gost {
-                GostFallback::Vm { ssh_target, openssl_cnf_path, timeout } => {
-                    connectors::send_raw_vm_gost(ssh_target, openssl_cnf_path, host, port, request, *timeout)
-                }
-                GostFallback::Host { openssl_cnf_path, timeout } => {
-                    connectors::send_raw_host_gost(openssl_cnf_path, host, port, request, *timeout)
-                }
-            };
-            gost_result.map_err(|gost_err| anyhow::anyhow!("прямой TLS: {direct_err}; ГОСТ тоже не удался: {gost_err}"))
+            let response = call_gost(gost, host, port, request)
+                .map_err(|gost_err| anyhow::anyhow!("прямой TLS: {direct_err}; ГОСТ тоже не удался: {gost_err}"))?;
+            routes.set(host, port, Route::Gost);
+            Ok(response)
+        }
+    }
+}
+
+fn call_gost(gost: &GostFallback, host: &str, port: u16, request: &[u8]) -> std::io::Result<Vec<u8>> {
+    match gost {
+        GostFallback::Vm { ssh_target, openssl_cnf_path, timeout } => {
+            connectors::send_raw_vm_gost(ssh_target, openssl_cnf_path, host, port, request, *timeout)
+        }
+        GostFallback::Host { openssl_cnf_path, timeout } => {
+            connectors::send_raw_host_gost(openssl_cnf_path, host, port, request, *timeout)
         }
     }
 }
