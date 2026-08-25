@@ -1,0 +1,43 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-exe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить Rust target и mingw-w64
+        run: |
+          rustup target add x86_64-pc-windows-gnu
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+
+      - name: Собрать gost-upstream.exe
+        run: cargo build --release --target x86_64-pc-windows-gnu -p gost-upstream
+
+      - name: Переименовать артефакт с версией
+        run: |
+          cp target/x86_64-pc-windows-gnu/release/gost-upstream.exe \
+             gost-upstream-${{ github.ref_name }}-windows-x86_64.exe
+
+      - name: Создать релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: gost-upstream-${{ github.ref_name }}-windows-x86_64.exe
+          body: |
+            Linux/macOS: соберите сами (`cargo build --release`) — так надёжнее,
+            чем тащить динамически слинкованный под конкретный дистрибутив
+            бинарник (glibc-версии разъезжаются между Debian/Arch/итд).
+            См. [README](README.md#сборка).
+
+            Windows: `.exe` ниже собран кросс-компиляцией
+            (`x86_64-pc-windows-gnu`), запускать без установки Rust.
