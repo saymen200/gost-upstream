@@ -30,6 +30,24 @@ Burp (или другой клиент) никогда не касается Г�
 cargo build --release
 ```
 
+### Кросс-сборка под Windows
+
+```
+rustup target add x86_64-pc-windows-gnu
+sudo apt install mingw-w64   # линковщик для этого таргета
+cargo build --release --target x86_64-pc-windows-gnu -p gost-upstream
+```
+
+Бинарник: `target/x86_64-pc-windows-gnu/release/gost-upstream.exe`. Для
+работы ГОСТ-фолбэка на Windows нужен `ssh.exe` в PATH (штатный OpenSSH
+Client — Settings → Apps → Optional features, в современных Windows часто
+уже включён).
+
+Неподписанный `.exe`, который генерирует сертификаты на лету, перехватывает
+TLS и спавнит дочерние процессы, — типичный кандидат на эвристический
+false positive в антивирусах (HackTool/PUA-класс детектов). Это ожидаемо
+для инструментов такого профиля, не специфично для Rust.
+
 ## Настройка VM с gost-engine
 
 Нужна отдельная машина (Linux) с собранным
