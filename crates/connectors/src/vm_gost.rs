@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -24,6 +25,9 @@ LEGACY-GOST2012-GOST8912-GOST8912:IANA-GOST2012-GOST8912-GOST8912:GOST2001-GOST8
 ///
 /// `timeout` — верхняя граница на весь процесс (страховка, если цель вообще
 /// не отвечает). Реальное завершение чтения — по тишине на stdout, см. ниже.
+/// Дедлайн реализован в Rust (`child.kill()` из отдельного потока), не через
+/// внешнюю утилиту `timeout` — той нет на Windows, а `ssh`-клиент есть
+/// (штатный OpenSSH в Windows 10/11).
 pub fn send_raw_vm_gost(
     ssh_target: &str,
     openssl_cnf_path: &str,
@@ -37,9 +41,7 @@ pub fn send_raw_vm_gost(
          -cipher {GOST_CIPHERS} -tls1_2 -quiet -ign_eof 2>/dev/null"
     );
 
-    let mut child = Command::new("timeout")
-        .arg(format!("{}s", timeout.as_secs()))
-        .arg("ssh")
+    let mut child = Command::new("ssh")
         .arg("-o")
         .arg("BatchMode=yes")
         .arg(ssh_target)
@@ -51,11 +53,21 @@ pub fn send_raw_vm_gost(
 
     child.stdin.take().unwrap().write_all(request)?;
 
-    // `-ign_eof` намеренно не закрывает stdout сам — единственный способ
-    // раньше был дождаться, пока его прибьёт внешний `timeout`, отсюда
-    // фиксированная задержка на КАЖДЫЙ запрос. Вместо этого читаем в фоновом
-    // потоке и решаем "ответ закончился" по паузе (тишина), а не по EOF.
-    let mut stdout = child.stdout.take().unwrap();
+    // `-ign_eof` намеренно не закрывает stdout сам — реальный сигнал "ответ
+    // закончился" это пауза на stdout, а не EOF (см. read-loop ниже). А
+    // `timeout` в аргументах — верхняя граница на случай, если цель вообще
+    // не отвечает: без внешней команды `timeout`, отдельный поток убивает
+    // процесс сам, если тот не уложился в дедлайн.
+    let child: Arc<Mutex<Child>> = Arc::new(Mutex::new(child));
+    {
+        let child = child.clone();
+        thread::spawn(move || {
+            thread::sleep(timeout);
+            let _ = child.lock().unwrap().kill();
+        });
+    }
+
+    let mut stdout = child.lock().unwrap().stdout.take().unwrap();
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -82,10 +94,11 @@ pub fn send_raw_vm_gost(
         }
     }
 
-    // Не ждём child.wait() здесь — это снова была бы блокировка до общего
-    // timeout. Реапим в фоне, чтобы не плодить зомби-процессы.
+    // Не ждём завершения здесь — это снова была бы блокировка. Реапим в
+    // фоне, чтобы не плодить зомби-процессы (актуально на Unix; на Windows
+    // просто освобождает handle).
     thread::spawn(move || {
-        let _ = child.wait();
+        let _ = child.lock().unwrap().wait();
     });
 
     Ok(response)
