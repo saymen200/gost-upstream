@@ -20,13 +20,14 @@ use std::time::Duration;
 ///
 /// Если прямой TLS до цели не удаётся (нет общего cipher suite и т.п. —
 /// типичный симптом ГОСТ-only сайта), прокси автоматически ретраит через
-/// `connectors::send_raw_vm_gost` с этими параметрами. `None` — фолбэка
-/// нет, прямой TLS — единственная попытка (как было раньше).
+/// gost-engine. Два варианта, где он крутится: `Vm` — на отдельной машине
+/// по SSH (крипто-плечо изолировано), `Host` — прямо на этой же машине
+/// (проще, без VM, но крипто-код исполняется тут же). `None` в `run()` —
+/// фолбэка нет вообще, прямой TLS — единственная попытка.
 #[derive(Clone)]
-pub struct GostFallback {
-    pub ssh_target: String,
-    pub openssl_cnf_path: String,
-    pub timeout: Duration,
+pub enum GostFallback {
+    Vm { ssh_target: String, openssl_cnf_path: String, timeout: Duration },
+    Host { openssl_cnf_path: String, timeout: Duration },
 }
 
 /// Каждый запрос перед отправкой проходит через `hook` (см. `hook.rs`) —
@@ -126,9 +127,16 @@ fn send_to_target(host: &str, port: u16, request: &[u8], gost: Option<&GostFallb
         Ok(response) => Ok(response),
         Err(direct_err) => {
             let Some(gost) = gost else { return Err(direct_err) };
-            eprintln!("прямой TLS до {host}:{port} не удался ({direct_err}), пробую через VM/ГОСТ");
-            connectors::send_raw_vm_gost(&gost.ssh_target, &gost.openssl_cnf_path, host, port, request, gost.timeout)
-                .map_err(|vm_err| anyhow::anyhow!("прямой TLS: {direct_err}; VM/ГОСТ тоже не удался: {vm_err}"))
+            eprintln!("прямой TLS до {host}:{port} не удался ({direct_err}), пробую через ГОСТ");
+            let gost_result = match gost {
+                GostFallback::Vm { ssh_target, openssl_cnf_path, timeout } => {
+                    connectors::send_raw_vm_gost(ssh_target, openssl_cnf_path, host, port, request, *timeout)
+                }
+                GostFallback::Host { openssl_cnf_path, timeout } => {
+                    connectors::send_raw_host_gost(openssl_cnf_path, host, port, request, *timeout)
+                }
+            };
+            gost_result.map_err(|gost_err| anyhow::anyhow!("прямой TLS: {direct_err}; ГОСТ тоже не удался: {gost_err}"))
         }
     }
 }

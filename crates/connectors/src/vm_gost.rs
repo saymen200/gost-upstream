@@ -20,14 +20,8 @@ LEGACY-GOST2012-GOST8912-GOST8912:IANA-GOST2012-GOST8912-GOST8912:GOST2001-GOST8
 /// трогает данные, `openssl s_client -quiet -ign_eof` не парсит HTTP — он
 /// просто шифрует stdin в сокет и расшифровывает сокет в stdout.
 ///
-/// `openssl_cnf_path` — путь на VM к конфигу с `dynamic_path` на собранный
+/// `openssl_cnf_path` — путь НА VM к конфигу с `dynamic_path` на собранный
 /// gost.so (см. INSTALL.md gost-engine, секция "How to Configure").
-///
-/// `timeout` — верхняя граница на весь процесс (страховка, если цель вообще
-/// не отвечает). Реальное завершение чтения — по тишине на stdout, см. ниже.
-/// Дедлайн реализован в Rust (`child.kill()` из отдельного потока), не через
-/// внешнюю утилиту `timeout` — той нет на Windows, а `ssh`-клиент есть
-/// (штатный OpenSSH в Windows 10/11).
 pub fn send_raw_vm_gost(
     ssh_target: &str,
     openssl_cnf_path: &str,
@@ -41,11 +35,44 @@ pub fn send_raw_vm_gost(
          -cipher {GOST_CIPHERS} -tls1_2 -quiet -ign_eof 2>/dev/null"
     );
 
-    let mut child = Command::new("ssh")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg(ssh_target)
-        .arg(remote_cmd)
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-o").arg("BatchMode=yes").arg(ssh_target).arg(remote_cmd);
+    run_with_deadline(cmd, request, timeout)
+}
+
+/// То же самое, но без VM/SSH — `openssl s_client` с gost-engine запускается
+/// прямо на той же машине, где крутится сам инструмент. Годится, когда
+/// изоляция крипто-плеча в отдельную VM не нужна (это уже не CryptoPro,
+/// а открытый gost-engine — ставить его на хост безопаснее, чем закрытый
+/// проприетарный CSP). `openssl_cnf_path` — путь на ЭТОЙ машине.
+pub fn send_raw_host_gost(
+    openssl_cnf_path: &str,
+    target_host: &str,
+    target_port: u16,
+    request: &[u8],
+    timeout: Duration,
+) -> std::io::Result<Vec<u8>> {
+    let mut cmd = Command::new("openssl");
+    cmd.env("OPENSSL_CONF", openssl_cnf_path)
+        .arg("s_client")
+        .arg("-connect")
+        .arg(format!("{target_host}:{target_port}"))
+        .arg("-cipher")
+        .arg(GOST_CIPHERS)
+        .arg("-tls1_2")
+        .arg("-quiet")
+        .arg("-ign_eof");
+    run_with_deadline(cmd, request, timeout)
+}
+
+/// Общая часть для vm- и host-режимов: спавнит `cmd` (уже настроенную —
+/// либо `ssh ... 'openssl s_client ...'`, либо `openssl s_client ...`
+/// напрямую), пишет `request` в stdin, читает ответ по idle-cutoff и
+/// обеспечивает верхнюю границу по времени через `child.kill()` из
+/// отдельного потока (не через внешнюю утилиту `timeout` — той нет на
+/// Windows).
+fn run_with_deadline(mut cmd: Command, request: &[u8], timeout: Duration) -> std::io::Result<Vec<u8>> {
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -55,9 +82,9 @@ pub fn send_raw_vm_gost(
 
     // `-ign_eof` намеренно не закрывает stdout сам — реальный сигнал "ответ
     // закончился" это пауза на stdout, а не EOF (см. read-loop ниже). А
-    // `timeout` в аргументах — верхняя граница на случай, если цель вообще
-    // не отвечает: без внешней команды `timeout`, отдельный поток убивает
-    // процесс сам, если тот не уложился в дедлайн.
+    // `timeout` — верхняя граница на случай, если цель вообще не отвечает:
+    // без внешней команды `timeout`, отдельный поток убивает процесс сам,
+    // если тот не уложился в дедлайн.
     let child: Arc<Mutex<Child>> = Arc::new(Mutex::new(child));
     {
         let child = child.clone();
@@ -83,9 +110,9 @@ pub fn send_raw_vm_gost(
         }
     });
 
-    // Первый байт может идти дольше (SSH-хендшейк + ГОСТ TLS-хендшейк на
-    // VM), поэтому для него окно шире; после того как данные пошли — пауза
-    // короче, обычно достаточно уже для "ответ дописан".
+    // Первый байт может идти дольше (SSH/ГОСТ TLS-хендшейк), поэтому для
+    // него окно шире; после того как данные пошли — пауза короче, обычно
+    // уже достаточно, чтобы считать "ответ дописан".
     let mut response = Vec::new();
     if let Ok(chunk) = rx.recv_timeout(Duration::from_secs(10)) {
         response.extend_from_slice(&chunk);

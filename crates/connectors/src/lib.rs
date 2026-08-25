@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub mod vm_gost;
-pub use vm_gost::send_raw_vm_gost;
+pub use vm_gost::{send_raw_host_gost, send_raw_vm_gost};
 
 /// Отправляет `request` как есть (побайтово, без какой-либо нормализации)
 /// через обычный TLS и собирает всё, что прилетело в ответ в течение

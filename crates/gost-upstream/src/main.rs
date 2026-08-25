@@ -9,8 +9,9 @@ use std::time::Duration;
 /// GOST TLS upstream proxy для Burp Suite (или любого инструмента с
 /// поддержкой upstream-прокси). Сам инструмент ГОСТ-крипто никогда не
 /// касается: он видит обычный TLS-сертификат на нужное имя, подписанный
-/// локальным CA, а настоящий ГОСТ TLS 1.2-хендшейк до цели делает VM,
-/// куда мы стучимся по SSH.
+/// локальным CA, а настоящий ГОСТ TLS 1.2-хендшейк до цели делает
+/// gost-engine — либо на отдельной VM по SSH (`--ssh-target`), либо прямо
+/// на этой машине (`--host-gost`).
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
@@ -30,18 +31,25 @@ struct Args {
     #[arg(long, default_value = "gost-upstream-ca-key.pem")]
     ca_key: PathBuf,
 
-    /// SSH-адрес VM с собранным gost-engine, например user@vm-host. Если
-    /// не задан — прокси работает в режиме обычного MITM без ГОСТ-фолбэка
-    /// (полезно для проверки самого прокси/сертификатов без VM).
-    #[arg(long)]
+    /// Режим VM: SSH-адрес машины с собранным gost-engine, например
+    /// user@vm-host. Крипто-плечо изолировано на отдельной машине.
+    /// Взаимоисключающе с --host-gost.
+    #[arg(long, conflicts_with = "host_gost")]
     ssh_target: Option<String>,
 
-    /// Путь НА VM к openssl.cnf с загруженным gost-engine (см. README —
+    /// Режим host: gost-engine стоит прямо на этой машине, openssl
+    /// s_client запускается локально, без SSH/VM. Взаимоисключающе с
+    /// --ssh-target.
+    #[arg(long, conflicts_with = "ssh_target")]
+    host_gost: bool,
+
+    /// Путь к openssl.cnf с загруженным gost-engine — НА VM в режиме
+    /// --ssh-target, или на этой машине в режиме --host-gost (см. README —
     /// движок должен грузиться через конфиг, не через флаг -engine).
     #[arg(long, default_value = "~/gost.cnf")]
     openssl_cnf: String,
 
-    /// Сколько ждать ответ от VM/ГОСТ-цели, прежде чем считать запрос
+    /// Сколько ждать ответ от ГОСТ-цели, прежде чем считать запрос
     /// проваленным.
     #[arg(long, default_value_t = 20)]
     gost_timeout_secs: u64,
@@ -56,15 +64,17 @@ fn main() -> anyhow::Result<()> {
         args.ca_cert.display()
     );
 
-    let gost = args.ssh_target.map(|ssh_target| GostFallback {
-        ssh_target,
-        openssl_cnf_path: args.openssl_cnf,
-        timeout: Duration::from_secs(args.gost_timeout_secs),
-    });
-    match &gost {
-        Some(g) => println!("ГОСТ-фолбэк через {} (openssl.cnf: {})", g.ssh_target, g.openssl_cnf_path),
-        None => println!("ГОСТ-фолбэк выключен (--ssh-target не задан) — обычный MITM без ГОСТ"),
-    }
+    let timeout = Duration::from_secs(args.gost_timeout_secs);
+    let gost = if let Some(ssh_target) = args.ssh_target {
+        println!("ГОСТ-фолбэк: VM через {ssh_target} (openssl.cnf: {})", args.openssl_cnf);
+        Some(GostFallback::Vm { ssh_target, openssl_cnf_path: args.openssl_cnf, timeout })
+    } else if args.host_gost {
+        println!("ГОСТ-фолбэк: локально на этой машине (openssl.cnf: {})", args.openssl_cnf);
+        Some(GostFallback::Host { openssl_cnf_path: args.openssl_cnf, timeout })
+    } else {
+        println!("ГОСТ-фолбэк выключен (--ssh-target/--host-gost не заданы) — обычный MITM без ГОСТ");
+        None
+    };
 
     println!(
         "Слушаю {} — укажите этот адрес как upstream proxy в Burp",
