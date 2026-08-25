@@ -46,7 +46,29 @@ Client — Settings → Apps → Optional features, в современных Wi
 Неподписанный `.exe`, который генерирует сертификаты на лету, перехватывает
 TLS и спавнит дочерние процессы, — типичный кандидат на эвристический
 false positive в антивирусах (HackTool/PUA-класс детектов). Это ожидаемо
-для инструментов такого профиля, не специфично для Rust.
+для инструментов такого профиля, не специфично для Rust. На практике
+собранный так `.exe` проверен на живой Windows 10 VM с Defender'ом — не
+ругается.
+
+### Нативная сборка на Windows
+
+Если собирать прямо на Windows-машине, а не кросс-компилировать с Linux —
+`cargo` кросс-платформенный, команды те же самые:
+
+1. Поставить Rust: [rustup-init.exe](https://rustup.rs) (или
+   `winget install Rustlang.Rustup`).
+2. Rustup по умолчанию ставит MSVC-таргет (`x86_64-pc-windows-msvc`), для
+   него нужен C++ тулчейн — rustup сам предложит поставить
+   "Visual Studio C++ Build Tools" при первой сборке, либо поставить
+   заранее вручную (компонент "Desktop development with C++").
+3. Дальше — ровно та же команда, что и на Linux, в PowerShell или cmd:
+
+```powershell
+cargo build --release
+```
+
+Бинарник: `target\release\gost-upstream.exe`. Требование по `ssh.exe` в
+PATH для ГОСТ-фолбэка — то же самое, что и в кросс-собранной версии.
 
 ## Настройка VM с gost-engine
 
