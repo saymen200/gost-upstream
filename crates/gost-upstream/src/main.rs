@@ -67,6 +67,13 @@ fn main() -> anyhow::Result<()> {
     let timeout = Duration::from_secs(args.gost_timeout_secs);
     let gost = if let Some(ssh_target) = args.ssh_target {
         println!("ГОСТ-фолбэк: VM через {ssh_target} (openssl.cnf: {})", args.openssl_cnf);
+        match connectors::check_ssh_reachable(&ssh_target, Duration::from_secs(5)) {
+            Ok(()) => println!("SSH до {ssh_target} — доступна"),
+            Err(e) => eprintln!(
+                "⚠ SSH до {ssh_target} не отвечает ({e}) — ГОСТ-фолбэк работать не будет, \
+                 пока VM не поднимется. Прокси всё равно запускается: обычный TLS продолжит работать."
+            ),
+        }
         Some(GostFallback::Vm { ssh_target, openssl_cnf_path: args.openssl_cnf, timeout })
     } else if args.host_gost {
         println!("ГОСТ-фолбэк: локально на этой машине (openssl.cnf: {})", args.openssl_cnf);

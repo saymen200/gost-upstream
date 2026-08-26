@@ -65,6 +65,34 @@ pub fn send_raw_host_gost(
     run_with_deadline(cmd, request, timeout)
 }
 
+/// Быстрая проверка "жива ли VM по SSH вообще" — отдельно от самой
+/// отправки, чтобы можно было предупредить пользователя один раз при
+/// старте, а не гадать по невнятной ошибке при каждом запросе, когда VM
+/// просто не поднята. `Err` содержит stderr от ssh (или текст ошибки
+/// spawn), уже без лишнего мусора — удобно печатать как есть.
+pub fn check_ssh_reachable(ssh_target: &str, timeout: Duration) -> Result<(), String> {
+    let result = Command::new("ssh")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg(format!("ConnectTimeout={}", timeout.as_secs().max(1)))
+        .arg(ssh_target)
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if stderr.is_empty() { format!("ssh завершился с {}", output.status) } else { stderr })
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Общая часть для vm- и host-режимов: спавнит `cmd` (уже настроенную —
 /// либо `ssh ... 'openssl s_client ...'`, либо `openssl s_client ...`
 /// напрямую), пишет `request` в stdin, читает ответ по idle-cutoff и
