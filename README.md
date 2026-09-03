@@ -148,7 +148,7 @@ OPENSSL_CONF=~/gost.cnf openssl ciphers -v "ALL:COMPLEMENTOFALL" | grep -i gost
 
 Режим host (gost-engine прямо на этой машине, без VM/SSH):
 ```
-./target/release/gost-upstream --host-gost
+./target/release/gost-upstream --host-gost --openssl-cnf /path/to/gost.cnf
 ```
 
 Полный список опций: `--help`. По умолчанию слушает `127.0.0.1:8888`,
